@@ -76,10 +76,9 @@ use num::Complex;
 ///
 /// If the number does leave the circle before we give up, return `Some(i)`, where
 /// `i` is the number of iterations it took.
-fn escapes(c: Complex<f64>, limit: u32) -> Option<u32> {
-    let mut z = Complex { re: 0.0, im: 0.0 };
+fn escapes(c: &Complex<f64>, mut z: Complex<f64>, limit: u32) -> Option<u32> {
     for i in 0..limit {
-        z = z*z + c;
+        z = z*z*z + c;
         if z.norm_sqr() > 4.0 {
             return Some(i);
         }
@@ -88,26 +87,64 @@ fn escapes(c: Complex<f64>, limit: u32) -> Option<u32> {
     return None;
 }
 
-/// Render a rectangle of the Mandelbrot set into a buffer of pixels.
+fn iter_to_gray(it: u32, limit: u32, elbow: (u32, f64)) -> f64
+{
+    if it <= elbow.0 {
+        it as f64 * elbow.1 / elbow.0 as f64
+    } else {
+        (it - elbow.0) as f64 * (1. - elbow.1) / (limit - elbow.0) as f64 + elbow.1
+    }
+}
+
+#[test]
+fn test_iter_to_gray() {
+    assert_eq!(iter_to_gray(0, 100, (4, 0.50)), 0.0);
+    assert_eq!(iter_to_gray(1, 100, (4, 0.50)), 0.125);
+    assert_eq!(iter_to_gray(2, 100, (4, 0.50)), 0.25);
+    assert_eq!(iter_to_gray(3, 100, (4, 0.50)), 0.375);
+    assert_eq!(iter_to_gray(4, 100, (4, 0.50)), 0.5);
+
+    assert_eq!(iter_to_gray(5, 100, (4, 0.50)), 0.5052083333333334);
+}
+
+/// Render a rectangle of the Julia set for `control` into a buffer of pixels.
 ///
 /// The `bounds` argument gives the width and height of the buffer `pixels`,
 /// which holds one grayscale pixel per byte. The `upper_left` and `lower_right`
 /// arguments specify points on the complex plane corresponding to the upper
 /// left and lower right corners of the pixel buffer.
-fn render(pixels: &mut [u8], bounds: (usize, usize),
+fn render(control: (f64, f64),
+          pixels: &mut [u8], bounds: (usize, usize),
           upper_left: (f64, f64), lower_right: (f64, f64))
 {
     assert!(pixels.len() == bounds.0 * bounds.1);
+
+    let limit = 100;
+    let control = Complex { re: control.0, im: control.1 };
 
     for r in 0 .. bounds.1 {
         for c in 0 .. bounds.0 {
             let point = pixel_to_point(bounds, (c, r),
                                        upper_left, lower_right);
-            pixels[r * bounds.0 + c] =
-                match escapes(Complex { re: point.0, im: point.1 }, 255) {
-                    None => 0,
-                    Some(count) => 255 - count as u8
-                };
+            let point = Complex { re: point.0, im: point.1 };
+
+            let gray = if let Some(it) = escapes(&control, point, limit) {
+                // Map the iteration count to value between 0 and 1.
+                // iteration counts 0..4 cover 0.0..0.16, counts
+                // 5..limit cover 0.16 to 1.0.
+                iter_to_gray(it, limit, (4, 0.20))
+            } else {
+                1.0
+            };
+
+            assert!(0.0 <= gray && gray <= 1.0);
+
+            // Brighten things up a bit: invert, cube to push it towards zero,
+            // and revert.
+            let gray = 1.0 - gray;
+            let gray = gray * gray * gray * gray;
+
+            pixels[r * bounds.0 + c] = f64::floor(gray * 255.0) as u8;
         }
     }
 }
@@ -152,12 +189,12 @@ use rayon::prelude::*;
 fn main() {
     let args : Vec<String> = std::env::args().collect();
 
-    if args.len() != 5 {
+    if args.len() != 6 {
         writeln!(std::io::stderr(),
-                 "Usage: mandelbrot FILE PIXELS UPPERLEFT LOWERRIGHT")
+                 "Usage: mandelbrot FILE PIXELS UPPERLEFT LOWERRIGHT C")
             .unwrap();
         writeln!(std::io::stderr(),
-                 "Example: {} mandel.png 1000x750 -1.20,0.35 -1,0.20",
+                 "Example: {} julia.png 1000x750 -1.20,0.35 -1,0.20 0.5620127,0.39680684",
                  args[0])
             .unwrap();
         std::process::exit(1);
@@ -169,6 +206,8 @@ fn main() {
         .expect("error parsing upper left corner point");
     let lower_right = parse_pair(&args[4], ',')
         .expect("error parsing lower right corner point");
+    let c = parse_pair(&args[5], ',')
+        .expect("error parsing Julia set control point");
 
     let mut pixels = vec![0; bounds.0 * bounds.1];
 
@@ -188,7 +227,7 @@ fn main() {
                                                      upper_left, lower_right);
                 let band_lower_right = pixel_to_point(bounds, (bounds.0, top + 1),
                                                       upper_left, lower_right);
-                render(band, band_bounds, band_upper_left, band_lower_right);
+                render(c, band, band_bounds, band_upper_left, band_lower_right);
             });
     }
 
